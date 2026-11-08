@@ -4,16 +4,16 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>Northgate · Dashboard</title>
+    <title>Gatekeeper · Dashboard</title>
     <link rel="stylesheet" href="/style.css">
     <script defer src="/dashboard.js"></script>
   </head>
   <body>
     <header class="site-header">
       <div class="shell header-inner">
-        <a class="brand" href="/" aria-label="Northgate home">
-          <span class="brand-mark" aria-hidden="true">N</span>
-          <span>Northgate</span>
+        <a class="brand" href="/" aria-label="Gatekeeper home">
+          <span class="brand-mark" aria-hidden="true">G</span>
+          <span>Gatekeeper</span>
         </a>
         <nav class="top-nav" aria-label="Admin navigation">
           <a href="/">Model registry</a>
@@ -39,7 +39,7 @@
         </div>
         <div class="dashboard-access-row">
           <div class="field token-field">
-            <label for="admin-token">NORTHGATE_ADMIN_TOKEN</label>
+            <label for="admin-token">ADMIN TOKEN</label>
             <div class="input-with-action">
               <input id="admin-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste admin token">
               <button id="toggle-admin-token" class="text-button" type="button" aria-controls="admin-token" aria-pressed="false">Show</button>
@@ -137,6 +137,6 @@
       </section>
     </main>
 
-    <footer class="site-footer shell">Counts are hourly aggregates. Northgate never stores test prompts, model responses, or stream contents.</footer>
+    <footer class="site-footer shell">Counts are hourly aggregates. Gatekeeper never stores test prompts, model responses, or stream contents.</footer>
   </body>
 </html>
