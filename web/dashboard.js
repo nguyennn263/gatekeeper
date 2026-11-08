@@ -49,7 +49,7 @@
     try {
       response = await fetch(path, { headers: authHeaders() });
     } catch (_error) {
-      throw new Error('Không thể kết nối tới Northgate.');
+      throw new Error('Không thể kết nối tới Gatekeeper.');
     }
     const text = await response.text();
     let payload = null;

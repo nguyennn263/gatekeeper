@@ -71,7 +71,7 @@
     try {
       response = await fetch(path, { ...options, headers });
     } catch (error) {
-      throw new Error('Không thể kết nối tới Northgate. Kiểm tra URL và thử lại.');
+      throw new Error('Không thể kết nối tới Gatekeeper. Kiểm tra URL và thử lại.');
     }
 
     const text = await response.text();
@@ -510,7 +510,7 @@
 
   async function deleteProviderModel(provider, model, button) {
     if (!provider?.slug || !model?.id) return;
-    if (!window.confirm(`Xóa ${model.publicId} khỏi registry? Model này sẽ không còn được harness gọi qua Northgate.`)) return;
+    if (!window.confirm(`Xóa ${model.publicId} khỏi registry? Model này sẽ không còn được harness gọi qua Gatekeeper.`)) return;
     clearError('inventory-error');
     button.disabled = true;
     button.textContent = '…';
