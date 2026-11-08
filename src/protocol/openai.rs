@@ -2,6 +2,7 @@ use super::common::ProtocolError;
 use serde_json::Value;
 
 /// Clone an OpenAI Chat Completions body and replace only its model.
+/// `stream_options` is only valid with `stream: true`, so it is dropped otherwise.
 pub fn chat_request_body(
     chat_request: &Value,
     upstream_model: &str,
@@ -11,6 +12,10 @@ pub fn chat_request_body(
         .cloned()
         .ok_or_else(|| ProtocolError::invalid("chat request must be a JSON object"))?;
     body.insert("model".into(), Value::String(upstream_model.to_owned()));
+    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if !streaming {
+        body.remove("stream_options");
+    }
     Ok(Value::Object(body))
 }
 
@@ -38,6 +43,27 @@ mod tests {
         let output = chat_request_body(&input, "upstream/model").unwrap();
         assert_eq!(output["model"], "upstream/model");
         assert_eq!(output["x-provider-extension"]["keep"], true);
+    }
+
+    #[test]
+    fn stream_options_are_dropped_for_non_stream_requests() {
+        let input = serde_json::json!({
+            "model": "public/name",
+            "messages": [],
+            "stream": false,
+            "stream_options": {"include_usage": true}
+        });
+        let output = chat_request_body(&input, "upstream/model").unwrap();
+        assert!(output.get("stream_options").is_none());
+
+        let streaming = serde_json::json!({
+            "model": "public/name",
+            "messages": [],
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        });
+        let output = chat_request_body(&streaming, "upstream/model").unwrap();
+        assert_eq!(output["stream_options"]["include_usage"], true);
     }
 
     #[test]

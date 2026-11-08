@@ -1,6 +1,6 @@
 //! OpenAI Responses (including Codex-style tool calling) translation.
 
-use super::common::{ProtocolError, content_text, json_string};
+use super::common::{ProtocolError, content_text, field, json_string};
 use serde_json::{Map, Value, json};
 
 pub fn chat_request_body(
@@ -10,8 +10,7 @@ pub fn chat_request_body(
     let input = chat_request
         .as_object()
         .ok_or_else(|| ProtocolError::invalid("chat request must be a JSON object"))?;
-    let messages = input
-        .get("messages")
+    let messages = field(input, "messages")
         .and_then(Value::as_array)
         .ok_or_else(|| ProtocolError::invalid("chat request messages must be an array"))?;
     let mut items = Vec::new();
@@ -22,40 +21,39 @@ pub fn chat_request_body(
     let mut body = Map::new();
     body.insert("model".into(), Value::String(upstream_model.to_owned()));
     body.insert("input".into(), Value::Array(items));
-    if let Some(value) = input.get("stream") {
+    if let Some(value) = field(input, "stream") {
         body.insert("stream".into(), value.clone());
     }
-    if let Some(value) = input.get("temperature") {
+    if let Some(value) = field(input, "temperature") {
         body.insert("temperature".into(), value.clone());
     }
-    if let Some(value) = input.get("top_p") {
+    if let Some(value) = field(input, "top_p") {
         body.insert("top_p".into(), value.clone());
     }
-    if let Some(value) = input
-        .get("max_completion_tokens")
-        .or_else(|| input.get("max_tokens"))
+    if let Some(value) =
+        field(input, "max_completion_tokens").or_else(|| field(input, "max_tokens"))
     {
         body.insert("max_output_tokens".into(), value.clone());
     }
-    if let Some(tools) = input.get("tools") {
+    if let Some(tools) = field(input, "tools") {
         body.insert("tools".into(), convert_tools(tools)?);
     }
-    if let Some(choice) = input.get("tool_choice") {
+    if let Some(choice) = field(input, "tool_choice") {
         body.insert("tool_choice".into(), convert_tool_choice(choice)?);
     }
-    if let Some(value) = input.get("parallel_tool_calls") {
+    if let Some(value) = field(input, "parallel_tool_calls") {
         body.insert("parallel_tool_calls".into(), value.clone());
     }
-    if let Some(value) = input.get("reasoning_effort") {
+    if let Some(value) = field(input, "reasoning_effort") {
         body.insert("reasoning".into(), json!({"effort": value}));
     }
-    if let Some(value) = input.get("user") {
+    if let Some(value) = field(input, "user") {
         body.insert("safety_identifier".into(), value.clone());
     }
-    if let Some(value) = input.get("response_format") {
+    if let Some(value) = field(input, "response_format") {
         body.insert("text".into(), convert_response_format(value)?);
     }
-    if let Some(value) = input.get("verbosity") {
+    if let Some(value) = field(input, "verbosity") {
         let text = body
             .entry("text")
             .or_insert_with(|| json!({"format":{"type":"text"}}));
@@ -64,7 +62,7 @@ pub fn chat_request_body(
             .ok_or_else(|| ProtocolError::conversion("text configuration is invalid"))?;
         object.insert("verbosity".into(), value.clone());
     }
-    if let Some(value) = input.get("logprobs") {
+    if let Some(value) = field(input, "logprobs") {
         let enabled = value
             .as_bool()
             .ok_or_else(|| ProtocolError::conversion("logprobs must be a boolean"))?;
@@ -72,10 +70,10 @@ pub fn chat_request_body(
             body.insert("include".into(), json!(["message.output_text.logprobs"]));
         }
     }
-    if let Some(value) = input.get("top_logprobs") {
+    if let Some(value) = field(input, "top_logprobs") {
         body.insert("top_logprobs".into(), value.clone());
     }
-    for field in [
+    for name in [
         "service_tier",
         "store",
         "metadata",
@@ -83,12 +81,12 @@ pub fn chat_request_body(
         "prompt_cache_retention",
         "safety_identifier",
     ] {
-        if let Some(value) = input.get(field) {
-            body.insert(field.into(), value.clone());
+        if let Some(value) = field(input, name) {
+            body.insert(name.into(), value.clone());
         }
     }
-    validate_modalities(input.get("modalities"))?;
-    validate_stream_options(input.get("stream_options"))?;
+    validate_modalities(field(input, "modalities"))?;
+    validate_stream_options(field(input, "stream_options"))?;
     reject_present(
         input,
         &[
@@ -181,9 +179,6 @@ fn convert_response_format(value: &Value) -> Result<Value, ProtocolError> {
                 })?;
             let mut format = schema.clone();
             format.insert("type".into(), json!("json_schema"));
-            if let Some(value) = format.remove("schema") {
-                format.insert("schema".into(), value);
-            }
             Ok(json!({"format": Value::Object(format)}))
         }
         _ => Err(ProtocolError::conversion(
@@ -509,6 +504,33 @@ mod tests {
         assert_eq!(body["top_logprobs"], 3);
         assert_eq!(body["prompt_cache_retention"], "24h");
         assert_eq!(body["x-provider-option"], "kept");
+    }
+
+    #[test]
+    fn null_optional_fields_are_treated_as_absent() {
+        let request = json!({
+            "messages":[{"role":"user","content":"hi"}],
+            "max_tokens": null,
+            "temperature": null,
+            "tools": null,
+            "tool_choice": null,
+            "reasoning_effort": null,
+            "response_format": null,
+            "stream": null,
+            "n": null
+        });
+        let body = chat_request_body(&request, "gpt").unwrap();
+        for key in [
+            "max_output_tokens",
+            "temperature",
+            "tools",
+            "tool_choice",
+            "reasoning",
+            "text",
+            "stream",
+        ] {
+            assert!(body.get(key).is_none(), "{key} should be absent");
+        }
     }
 
     #[test]

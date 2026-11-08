@@ -31,6 +31,11 @@ still require the admin bearer token.
 
 `protocol` is one of `openai`, `anthropic`, or `responses`.
 
+`base_url` should include the provider's version prefix (for example
+`https://api.example.com/v1`). Northgate appends `/models` here and
+`/chat/completions`, `/messages`, or `/responses` when proxying. A bare origin
+without a path is treated as `/v1`.
+
 ### Enrich selected model metadata
 
 `POST /admin/api/models/enrich`
@@ -184,6 +189,11 @@ extension fields are forwarded unchanged. Known standard fields without a safe
 target representation return a clear 400 error instead of disappearing.
 
 Both JSON and `stream: true` responses use OpenAI Chat Completions shapes.
+Optional fields sent as `null` are treated as absent. For Anthropic upstreams,
+`temperature` takes precedence when `top_p` is also set, empty text parts are
+dropped, and `data:` image URLs are converted to inline base64 sources.
+`usage.prompt_tokens` includes cached input, with the cached share reported in
+`usage.prompt_tokens_details.cached_tokens`.
 
 Fallback attempts are sequential and remain within the same inbound request.
 For streaming calls, Northgate may switch keys only before any SSE output has

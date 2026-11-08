@@ -1195,6 +1195,12 @@ async fn dashboard_stats_and_model_tests_report_usage_and_full_stream() {
                     .header(header::CONTENT_TYPE, "text/event-stream")
                     .body(Body::from_stream(first.chain(rest)))
                     .unwrap()
+            } else if body.get("stream_options").is_some() {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"message":"stream_options is only allowed when stream is true"}})),
+                )
+                    .into_response()
             } else {
                 Json(json!({
                     "id":"test-json", "object":"chat.completion", "model":"model-a",
@@ -1361,5 +1367,137 @@ async fn dashboard_stats_and_model_tests_report_usage_and_full_stream() {
     let empty = response_json(empty).await;
     assert_eq!(empty["summary"]["requests"], 0);
     assert!(empty["models"].as_array().unwrap().is_empty());
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn bare_origin_base_url_discovers_and_proxies_under_v1() {
+    let upstream = Router::new()
+        .route(
+            "/v1/models",
+            get(|| async { Json(json!({"data": [{"id": "model-a"}]})) }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "chat_1", "object": "chat.completion", "model": "model-a",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}]
+                }))
+            }),
+        );
+    let (upstream_address, upstream_task) = spawn(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let store = test_store(&directory).await;
+    let gateway = app::router(test_config(&directory.path().join("northgate.db")), store).unwrap();
+
+    let saved = gateway
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/admin/api/providers",
+            ADMIN_TOKEN,
+            json!({
+                "name": "Bare", "base_url": format!("http://{upstream_address}"),
+                "api_key": PROVIDER_KEY, "protocol": "openai",
+                "models": [{"id": "model-a"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::CREATED);
+
+    let chat = gateway
+        .oneshot(json_request(
+            "POST",
+            "/v1/chat/completions",
+            GATEWAY_KEY,
+            json!({"model": "bare/model-a", "messages": [{"role": "user", "content": "hi"}]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(chat.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(chat).await["choices"][0]["message"]["content"],
+        "hello"
+    );
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn inbound_concurrency_limit_sheds_load_with_503() {
+    let upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            StatusCode::OK
+        }),
+    );
+    let (upstream_address, upstream_task) = spawn(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let store = test_store(&directory).await;
+    store
+        .save_provider(
+            NewProvider::new(
+                "Slow",
+                format!("http://{upstream_address}/v1"),
+                PROVIDER_KEY,
+                UpstreamProtocol::OpenAi,
+                vec![ModelMetadata {
+                    upstream_id: "model-a".to_owned(),
+                    display_name: None,
+                    context_window: None,
+                    max_output_tokens: None,
+                    capabilities: ModelCapabilities::default(),
+                }],
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut config = (*test_config(&directory.path().join("northgate.db"))).clone();
+    config.max_inbound_concurrency = 1;
+    let gateway = app::router(Arc::new(config), store).unwrap();
+
+    let blocked = gateway.clone();
+    let holder = tokio::spawn(async move {
+        blocked
+            .oneshot(json_request(
+                "POST",
+                "/v1/chat/completions",
+                GATEWAY_KEY,
+                json!({"model": "slow/model-a", "messages": []}),
+            ))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let shed = gateway
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header(header::AUTHORIZATION, format!("Bearer {GATEWAY_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(shed.headers()["x-northgate-error-source"], "NORTHGATE");
+    assert_eq!(response_json(shed).await["error"]["code"], "gateway_busy");
+
+    let health = gateway
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    holder.abort();
     upstream_task.abort();
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::protocol::UpstreamProtocol;
+use crate::protocol::{UpstreamProtocol, build_endpoint_url};
 
 const MAX_DISCOVERY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DISCOVERED_MODELS: usize = 2_000;
@@ -54,15 +54,7 @@ pub async fn discover_models(
     body_idle_timeout: Duration,
 ) -> Result<Vec<DiscoveredModel>, DiscoveryError> {
     let endpoint = models_endpoint(base_url)?;
-    let mut request = client
-        .get(endpoint)
-        .header(header::ACCEPT, "application/json");
-    request = match protocol {
-        UpstreamProtocol::Anthropic => request
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01"),
-        UpstreamProtocol::OpenAi | UpstreamProtocol::Responses => request.bearer_auth(api_key),
-    };
+    let request = authorized_get(client, protocol, endpoint, api_key);
     let response = tokio::time::timeout(first_byte_timeout, request.send())
         .await
         .map_err(|_| DiscoveryError::Timeout)?
@@ -138,15 +130,7 @@ async fn fetch_model_detail(
 ) -> Option<DiscoveredModel> {
     let mut endpoint = models_endpoint.clone();
     endpoint.path_segments_mut().ok()?.push(id);
-    let mut request = client
-        .get(endpoint)
-        .header(header::ACCEPT, "application/json");
-    request = match protocol {
-        UpstreamProtocol::Anthropic => request
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01"),
-        UpstreamProtocol::OpenAi | UpstreamProtocol::Responses => request.bearer_auth(api_key),
-    };
+    let request = authorized_get(client, protocol, endpoint, api_key);
     let response = tokio::time::timeout(first_byte_timeout, request.send())
         .await
         .ok()?
@@ -176,26 +160,44 @@ fn merge_metadata(model: &mut DiscoveredModel, detail: DiscoveredModel) {
     model.capabilities.vision = model.capabilities.vision.or(detail.capabilities.vision);
 }
 
+fn authorized_get(
+    client: &Client,
+    protocol: UpstreamProtocol,
+    endpoint: Url,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .get(endpoint)
+        .header(header::ACCEPT, "application/json");
+    match protocol {
+        UpstreamProtocol::Anthropic => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        UpstreamProtocol::OpenAi | UpstreamProtocol::Responses => request.bearer_auth(api_key),
+    }
+}
+
+/// Derived with the same rule as the chat endpoints so a base URL that
+/// discovers models also proxies requests.
 pub fn models_endpoint(base_url: &str) -> Result<Url, DiscoveryError> {
-    let mut url = Url::parse(base_url).map_err(|_| DiscoveryError::InvalidUrl)?;
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let endpoint = if trimmed.to_ascii_lowercase().ends_with("/models") {
+        build_endpoint_url(trimmed, "/models")
+            .map(|_| trimmed.to_owned())
+            .map_err(|_| DiscoveryError::InvalidUrl)?
+    } else {
+        build_endpoint_url(trimmed, "/models").map_err(|_| DiscoveryError::InvalidUrl)?
+    };
+    let url = Url::parse(&endpoint).map_err(|_| DiscoveryError::InvalidUrl)?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(DiscoveryError::InvalidUrl);
     }
-    url.set_query(None);
-    let path = url.path().trim_end_matches('/');
-    let next = if path.ends_with("/models") {
-        path.to_owned()
-    } else if path.ends_with("/v1") {
-        format!("{path}/models")
-    } else {
-        format!("{path}/v1/models")
-    };
-    url.set_path(&next);
     Ok(url)
 }
 
@@ -354,6 +356,20 @@ mod tests {
             models_endpoint("http://127.0.0.1:11434").unwrap().as_str(),
             "http://127.0.0.1:11434/v1/models"
         );
+        assert_eq!(
+            models_endpoint("https://example.test/v1beta/openai")
+                .unwrap()
+                .as_str(),
+            "https://example.test/v1beta/openai/models"
+        );
+        assert_eq!(
+            models_endpoint("https://example.test/v1/models/")
+                .unwrap()
+                .as_str(),
+            "https://example.test/v1/models"
+        );
+        assert!(models_endpoint("https://example.test/v1?key=1").is_err());
+        assert!(models_endpoint("https://user:pw@example.test/v1").is_err());
     }
 
     #[test]

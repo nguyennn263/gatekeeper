@@ -24,6 +24,10 @@ It supports these saved upstream protocols:
 | `anthropic` | `/messages` | Anthropic Messages translation |
 | `responses` | `/responses` | OpenAI Responses / Codex-style translation |
 
+Model discovery appends `/models` with the same rule. A base URL that is a bare
+origin (`https://api.example.com`) is treated as `https://api.example.com/v1`;
+any other path is used exactly as saved.
+
 The public API is deliberately small: `GET /v1/models` and
 `POST /v1/chat/completions`. Northgate does not route between models, load
 balance, impose quotas, retain prompts/responses, or promote fallback keys.
@@ -91,7 +95,8 @@ pattern rather than call SQLite directly from an async route.
 timeouts, DNS, HTTP-client caching, retries, and public error responses.
 `protocol/` must stay
 transport-neutral: it converts JSON/SSE but must not acquire a Reqwest client,
-database handle, or logging path that can expose credentials.
+database handle, or logging path that can expose credentials. Optional OpenAI
+fields sent as JSON `null` are treated as absent by every adapter.
 
 The browser is not authoritative. Provider save repeats model discovery and
 metadata enrichment; only selected model IDs are trusted from the browser. UI
@@ -143,7 +148,10 @@ Harness request
 ```
 
 Inbound concurrency and upstream concurrency are separate, nonblocking limits.
-Exhaustion returns `503 gateway_busy`, not an unbounded queue. Non-stream
+Exhaustion returns `503 gateway_busy`, not an unbounded queue: the inbound
+limit is one shared semaphore over `/admin/api/*` and `/v1/*` wrapped in a
+load-shedding layer, and upstream permits use `try_acquire`. Static assets and
+`/healthz` are outside the inbound limit so liveness probes keep answering. Non-stream
 success bodies are capped at 8 MiB; provider error bodies at 256 KiB. Discovery
 is capped at 2,000 models and 4 MiB.
 
@@ -176,6 +184,9 @@ the final provider failure. Cached input is stored separately and excluded from
 | Anthropic | `input_tokens + cache_creation_input_tokens` | `output_tokens` | `cache_read_input_tokens` |
 
 If the provider omits usage, tokens are zero while the request count remains.
+Usage returned to the harness follows OpenAI semantics: `prompt_tokens` counts
+all input including cached tokens, and `prompt_tokens_details.cached_tokens`
+reports the cached portion.
 
 ## Security invariants
 

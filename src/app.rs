@@ -6,8 +6,9 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    BoxError, Json, Router,
     body::Body,
+    error_handling::HandleErrorLayer,
     extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
@@ -20,7 +21,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tower::limit::ConcurrencyLimitLayer;
+use tower::{ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer};
 use tower_http::{timeout::RequestBodyTimeoutLayer, trace::TraceLayer};
 use zeroize::Zeroize;
 
@@ -32,8 +33,8 @@ use crate::{
     protocol::{self, UpstreamProtocol},
     store::{
         MAX_FALLBACK_API_KEYS, MAX_MODELS_PER_PROVIDER, ModelCapabilities, ModelMetadata,
-        ModelUsage, NewProvider, ProviderSummary, ResolvedModel, Store, StoreError, TokenUsage,
-        UsageTotals,
+        ModelSummary, ModelUsage, NewProvider, ProviderSummary, ResolvedModel, Store, StoreError,
+        TokenUsage, UsageTotals,
     },
     web,
 };
@@ -106,6 +107,21 @@ pub fn router(config: Arc<Config>, store: Store) -> anyhow::Result<Router> {
             state.clone(),
             require_gateway_before_body,
         ));
+    // One semaphore shared by every API route; static assets and /healthz stay
+    // outside the limit so liveness probes keep answering under load.
+    let api = Router::new()
+        .merge(admin)
+        .merge(gateway)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
+        .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|_: BoxError| async {
+                    AppError::Busy
+                }))
+                .layer(LoadShedLayer::new())
+                .layer(GlobalConcurrencyLimitLayer::new(inbound_limit)),
+        );
     Ok(Router::new()
         .route("/", get(web::index))
         .route("/dashboard", get(web::dashboard))
@@ -113,11 +129,7 @@ pub fn router(config: Arc<Config>, store: Store) -> anyhow::Result<Router> {
         .route("/dashboard.js", get(web::dashboard_javascript))
         .route("/style.css", get(web::stylesheet))
         .route("/healthz", get(health))
-        .merge(admin)
-        .merge(gateway)
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
-        .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
-        .layer(ConcurrencyLimitLayer::new(inbound_limit))
+        .merge(api)
         .layer(TraceLayer::new_for_http())
         .with_state(state))
 }
@@ -286,21 +298,7 @@ async fn save_provider(
             .collect(),
     )
     .await?;
-    let models = selected
-        .into_iter()
-        .map(|model| ModelMetadata {
-            upstream_id: model.id,
-            display_name: Some(model.display_name),
-            context_window: model.context_window,
-            max_output_tokens: model.max_output_tokens,
-            capabilities: ModelCapabilities {
-                tools: model.capabilities.tools.unwrap_or(false),
-                vision: model.capabilities.vision.unwrap_or(false),
-                reasoning: false,
-                streaming: model.capabilities.streaming.unwrap_or(true),
-            },
-        })
-        .collect();
+    let models = selected.into_iter().map(ModelMetadata::from).collect();
     let provider = NewProvider::new(
         std::mem::take(&mut request.name),
         std::mem::take(&mut request.base_url),
@@ -374,21 +372,7 @@ async fn add_provider_models(
         request.models.into_iter().map(|model| model.id).collect(),
     )
     .await?;
-    let models = selected
-        .into_iter()
-        .map(|model| ModelMetadata {
-            upstream_id: model.id,
-            display_name: Some(model.display_name),
-            context_window: model.context_window,
-            max_output_tokens: model.max_output_tokens,
-            capabilities: ModelCapabilities {
-                tools: model.capabilities.tools.unwrap_or(false),
-                vision: model.capabilities.vision.unwrap_or(false),
-                reasoning: false,
-                streaming: model.capabilities.streaming.unwrap_or(true),
-            },
-        })
-        .collect();
+    let models = selected.into_iter().map(ModelMetadata::from).collect();
     state
         .store
         .add_models(&slug, models)
@@ -431,6 +415,23 @@ async fn delete_provider_model(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)
+    }
+}
+
+impl From<DiscoveredModel> for ModelMetadata {
+    fn from(model: DiscoveredModel) -> Self {
+        Self {
+            upstream_id: model.id,
+            display_name: Some(model.display_name),
+            context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
+            capabilities: ModelCapabilities {
+                tools: model.capabilities.tools.unwrap_or(false),
+                vision: model.capabilities.vision.unwrap_or(false),
+                reasoning: false,
+                streaming: model.capabilities.streaming.unwrap_or(true),
+            },
+        }
     }
 }
 
@@ -501,6 +502,19 @@ struct InventoryModel {
     capabilities: ModelCapabilities,
 }
 
+impl From<ModelSummary> for InventoryModel {
+    fn from(model: ModelSummary) -> Self {
+        Self {
+            id: model.upstream_id,
+            public_id: model.alias,
+            display_name: model.display_name,
+            context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
+            capabilities: model.capabilities,
+        }
+    }
+}
+
 async fn list_providers(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -517,14 +531,7 @@ async fn list_providers(
         by_provider
             .entry(model.provider_slug.clone())
             .or_default()
-            .push(InventoryModel {
-                id: model.upstream_id,
-                public_id: model.alias,
-                display_name: model.display_name,
-                context_window: model.context_window,
-                max_output_tokens: model.max_output_tokens,
-                capabilities: model.capabilities,
-            });
+            .push(InventoryModel::from(model));
     }
     let inventory = providers
         .into_iter()
@@ -546,14 +553,7 @@ async fn inventory_for_provider(
         .map_err(map_store_error)?
         .into_iter()
         .filter(|model| model.provider_slug == provider.slug)
-        .map(|model| InventoryModel {
-            id: model.upstream_id,
-            public_id: model.alias,
-            display_name: model.display_name,
-            context_window: model.context_window,
-            max_output_tokens: model.max_output_tokens,
-            capabilities: model.capabilities,
-        })
+        .map(InventoryModel::from)
         .collect();
     Ok(ProviderInventory { provider, models })
 }
@@ -741,13 +741,15 @@ async fn test_model(
 ) -> Result<Response, AppError> {
     require_bearer(&headers, &state.config.admin_token)?;
     let started = Instant::now();
-    let chat_request = json!({
+    let mut chat_request = json!({
         "model": request.model,
         "messages": [{"role": "user", "content": "Reply with OK."}],
         "max_tokens": 16,
-        "stream": request.stream,
-        "stream_options": {"include_usage": true}
+        "stream": request.stream
     });
+    if request.stream {
+        chat_request["stream_options"] = json!({"include_usage": true});
+    }
     let mut response = execute_chat(state, chat_request).await?;
     let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX));
     if let Ok(value) = HeaderValue::from_str(&elapsed.to_string()) {
@@ -1536,6 +1538,11 @@ async fn upstream_client(state: &AppState, target: &str) -> Result<Client, AppEr
     let host = url
         .host_str()
         .ok_or_else(|| AppError::Invalid("provider URL has no host".to_owned()))?;
+    let literal_ip = match url.host() {
+        Some(url::Host::Ipv4(address)) => Some(IpAddr::V4(address)),
+        Some(url::Host::Ipv6(address)) => Some(IpAddr::V6(address)),
+        _ => None,
+    };
     let port = url
         .port_or_known_default()
         .ok_or_else(|| AppError::Invalid("provider URL has no valid port".to_owned()))?;
@@ -1547,7 +1554,10 @@ async fn upstream_client(state: &AppState, target: &str) -> Result<Client, AppEr
         return Ok(cached.client.clone());
     }
 
-    let addresses = resolve_origin(host, port, state.config.connect_timeout).await?;
+    let addresses = match literal_ip {
+        Some(address) => vec![SocketAddr::new(address, port)],
+        None => resolve_origin(host, port, state.config.connect_timeout).await?,
+    };
     if !state.config.allow_private_upstreams
         && addresses.iter().any(|address| !is_public_ip(address.ip()))
     {
@@ -1562,7 +1572,7 @@ async fn upstream_client(state: &AppState, target: &str) -> Result<Client, AppEr
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
-    if host.parse::<IpAddr>().is_err() {
+    if literal_ip.is_none() {
         builder = builder.resolve_to_addrs(host, &addresses);
     }
     let client = builder.build().map_err(|_| AppError::Internal)?;
@@ -1586,9 +1596,6 @@ async fn resolve_origin(
     port: u16,
     timeout: Duration,
 ) -> Result<Vec<SocketAddr>, AppError> {
-    if let Ok(address) = host.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(address, port)]);
-    }
     let resolved = tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
         .await
         .map_err(|_| AppError::Timeout)?
@@ -1632,12 +1639,28 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         return is_public_ipv4(mapped);
     }
     let segments = address.segments();
+    // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed a reachable IPv4 address.
+    let embedded_ipv4 = if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        Some(Ipv4Addr::from(
+            ((segments[6] as u32) << 16) | segments[7] as u32,
+        ))
+    } else if segments[0] == 0x2002 {
+        Some(Ipv4Addr::from(
+            ((segments[1] as u32) << 16) | segments[2] as u32,
+        ))
+    } else {
+        None
+    };
+    if let Some(embedded) = embedded_ipv4 {
+        return is_public_ipv4(embedded);
+    }
     !(address.is_loopback()
         || address.is_unspecified()
         || address.is_multicast()
         || address.is_unique_local()
         || address.is_unicast_link_local()
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x2001 && segments[1] == 0x0000)
         || (segments[0] & 0xffc0) == 0xfec0)
 }
 
@@ -1672,12 +1695,21 @@ mod tests {
             "10.0.0.1",
             "169.254.169.254",
             "192.168.1.1",
+            "100.64.0.1",
             "::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::7f00:1",
+            "2002:c0a8:101::1",
+            "2001::1",
             "fc00::1",
             "fe80::1",
         ] {
-            assert!(!is_public_ip(address.parse::<IpAddr>().unwrap()));
+            assert!(
+                !is_public_ip(address.parse::<IpAddr>().unwrap()),
+                "{address} must not be public"
+            );
         }
+        assert!(is_public_ip("64:ff9b::101:101".parse().unwrap()));
         assert!(is_public_ip("1.1.1.1".parse().unwrap()));
         assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
