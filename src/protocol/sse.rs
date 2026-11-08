@@ -188,6 +188,10 @@ impl SseParser {
         line: &[u8],
         events: &mut Vec<SseEvent>,
     ) -> Result<(), ProtocolError> {
+        // Keep-alive comments are not buffered, so they do not count toward the limit.
+        if line.first() == Some(&b':') {
+            return Ok(());
+        }
         self.event_bytes = self
             .event_bytes
             .saturating_add(line.len())
@@ -204,9 +208,6 @@ impl SseParser {
             } else {
                 self.event_bytes = 0;
             }
-            return Ok(());
-        }
-        if line.starts_with(':') {
             return Ok(());
         }
         let (field, value) = line
@@ -286,7 +287,7 @@ fn chunk(id: &str, model: &str, delta: Value, finish_reason: Option<&str>) -> St
     )
 }
 
-fn usage_chunk(id: &str, model: &str, input: u64, output: u64) -> String {
+fn usage_chunk(id: &str, model: &str, prompt: u64, completion: u64, cached: u64) -> String {
     sse_data(
         &json!({
             "id": id,
@@ -294,7 +295,12 @@ fn usage_chunk(id: &str, model: &str, input: u64, output: u64) -> String {
             "created": 0,
             "model": model,
             "choices": [],
-            "usage": {"prompt_tokens": input, "completion_tokens": output, "total_tokens": input + output}
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt.saturating_add(completion),
+                "prompt_tokens_details": {"cached_tokens": cached}
+            }
         })
         .to_string(),
     )
@@ -479,16 +485,16 @@ impl AnthropicSseConverter {
             }
             "content_block_start" => {
                 let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
-                if let Some(block) = value.get("content_block") {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let tool_index = self.tool_index(index);
-                        output.push(chunk(
-                            &self.id,
-                            &self.model,
-                            json!({"tool_calls":[{"index":tool_index,"id":block.get("id").cloned().unwrap_or(Value::Null),"type":"function","function":{"name":block.get("name").cloned().unwrap_or(Value::String(String::new())),"arguments":""}}]}),
-                            None,
-                        ));
-                    }
+                if let Some(block) = value.get("content_block")
+                    && block.get("type").and_then(Value::as_str) == Some("tool_use")
+                {
+                    let tool_index = self.tool_index(index);
+                    output.push(chunk(
+                        &self.id,
+                        &self.model,
+                        json!({"tool_calls":[{"index":tool_index,"id":block.get("id").cloned().unwrap_or(Value::Null),"type":"function","function":{"name":block.get("name").cloned().unwrap_or(Value::String(String::new())),"arguments":""}}]}),
+                        None,
+                    ));
                 }
             }
             "content_block_delta" => {
@@ -514,11 +520,16 @@ impl AnthropicSseConverter {
             }
             "message_delta" => {
                 if let Some(usage) = value.get("usage") {
-                    let output_tokens = usage
-                        .get("output_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    self.output_tokens = output_tokens;
+                    if let Some(uncached) = usage["input_tokens"].as_u64() {
+                        let created = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        self.input_tokens = uncached.saturating_add(created);
+                    }
+                    if let Some(cached) = usage["cache_read_input_tokens"].as_u64() {
+                        self.cache_tokens = cached;
+                    }
+                    self.output_tokens = usage["output_tokens"]
+                        .as_u64()
+                        .unwrap_or(self.output_tokens);
                     self.saw_usage = true;
                     if let Some(reason) = value["delta"]["stop_reason"].as_str() {
                         self.emit_finish(output, reason);
@@ -527,8 +538,9 @@ impl AnthropicSseConverter {
                         output.push(usage_chunk(
                             &self.id,
                             &self.model,
-                            self.input_tokens,
-                            output_tokens,
+                            self.input_tokens.saturating_add(self.cache_tokens),
+                            self.output_tokens,
+                            self.cache_tokens,
                         ));
                     }
                 } else if let Some(reason) = value["delta"]["stop_reason"].as_str() {
@@ -911,12 +923,18 @@ impl ResponsesSseConverter {
             let input = usage
                 .get("input_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(self.input_tokens);
+                .unwrap_or(self.input_tokens.saturating_add(self.cache_tokens));
             let completion = usage
                 .get("output_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(0);
-            output.push(usage_chunk(&self.id, &self.model, input, completion));
+                .unwrap_or(self.output_tokens);
+            output.push(usage_chunk(
+                &self.id,
+                &self.model,
+                input,
+                completion,
+                self.cache_tokens,
+            ));
         }
     }
 
@@ -1190,6 +1208,38 @@ mod tests {
         assert!(join(&output).contains("hi"));
         assert!(join(&output).contains("total_tokens"));
         assert_eq!(join(&output).matches("data: [DONE]").count(), 1);
+    }
+
+    #[test]
+    fn comment_lines_do_not_count_toward_event_limit() {
+        let mut passthrough = OpenAiSsePassthrough::new(64).unwrap();
+        let keepalives = ": keep-alive\n".repeat(20);
+        assert!(passthrough.push(keepalives.as_bytes()).unwrap().is_empty());
+        let frames = passthrough.push(b"data: {}\n\n").unwrap();
+        assert_eq!(frames.len(), 1);
+    }
+
+    #[test]
+    fn anthropic_usage_frame_folds_cache_reads_into_prompt_tokens() {
+        let mut converter = AnthropicSseConverter::new("claude", 4096).unwrap();
+        let mut output = converter
+            .push(b"event: message_start\ndata: {\"message\":{\"id\":\"m\",\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":10}}}\n\n")
+            .unwrap();
+        output.extend(converter.push(b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n").unwrap());
+        let usage = output
+            .iter()
+            .flat_map(|frame| frame.lines())
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find(|value| value.get("usage").is_some())
+            .expect("usage frame");
+        assert_eq!(usage["usage"]["prompt_tokens"], 12);
+        assert_eq!(usage["usage"]["prompt_tokens_details"]["cached_tokens"], 10);
+        assert_eq!(usage["usage"]["total_tokens"], 15);
+        let reported = converter.usage().unwrap();
+        assert_eq!(reported.input_tokens, 2);
+        assert_eq!(reported.cache_tokens, 10);
+        assert_eq!(reported.output_tokens, 3);
     }
 
     #[test]

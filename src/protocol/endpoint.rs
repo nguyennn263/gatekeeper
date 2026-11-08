@@ -9,6 +9,10 @@ pub fn upstream_path(protocol: UpstreamProtocol) -> &'static str {
     }
 }
 
+/// Prefix assumed for a bare-origin base URL, so `https://host` and
+/// `https://host/v1` resolve to the same endpoints.
+pub const DEFAULT_VERSION_PREFIX: &str = "/v1";
+
 /// Safely append a fixed endpoint path to a provider base URL.
 ///
 /// The function rejects credentials, fragments, queries, control characters,
@@ -76,11 +80,12 @@ pub fn build_endpoint_url(base_url: &str, endpoint_path: &str) -> Result<String,
         ));
     }
 
-    let base_path = &base[authority_end..];
-    let joined = if base_path.is_empty() || base_path == "/" {
-        format!("{base}/{path}")
+    let origin = &base[..authority_end];
+    let base_path = base[authority_end..].trim_end_matches('/');
+    let joined = if base_path.is_empty() {
+        format!("{origin}{DEFAULT_VERSION_PREFIX}/{path}")
     } else {
-        format!("{}/{}", base.trim_end_matches('/'), path)
+        format!("{origin}{base_path}/{path}")
     };
     Ok(joined)
 }
@@ -94,6 +99,20 @@ mod tests {
         assert_eq!(
             build_endpoint_url("https://example.test/v1/", "/chat/completions").unwrap(),
             "https://example.test/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn bare_origin_gets_default_version_prefix() {
+        for base in ["https://example.test", "https://example.test/"] {
+            assert_eq!(
+                build_endpoint_url(base, "/chat/completions").unwrap(),
+                "https://example.test/v1/chat/completions"
+            );
+        }
+        assert_eq!(
+            build_endpoint_url("https://example.test/v1beta/openai/", "/chat/completions").unwrap(),
+            "https://example.test/v1beta/openai/chat/completions"
         );
     }
 

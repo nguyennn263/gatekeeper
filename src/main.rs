@@ -28,14 +28,20 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Only a directory Northgate creates itself is restricted to mode 0700.
 fn prepare_storage_path(path: &std::path::Path) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        && !parent.exists()
+    {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create database directory {}", parent.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("failed to secure {}", parent.display()))?;
         }
     }
     #[cfg(unix)]
@@ -47,7 +53,8 @@ fn prepare_storage_path(path: &std::path::Path) -> anyhow::Result<()> {
             .mode(0o600)
             .open(path)
             .with_context(|| format!("failed to prepare database file {}", path.display()))?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to secure {}", path.display()))?;
     }
     Ok(())
 }

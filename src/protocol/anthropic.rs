@@ -1,7 +1,9 @@
 //! OpenAI Chat Completions <-> Anthropic Messages translation.
 
-use super::common::{ProtocolError, content_text, json_string};
+use super::common::{ProtocolError, content_text, field, json_string};
 use serde_json::{Map, Value, json};
+
+const DEFAULT_MAX_TOKENS: u64 = 4096;
 
 pub fn chat_request_body(
     chat_request: &Value,
@@ -63,22 +65,24 @@ pub fn chat_request_body(
     body.insert("messages".into(), Value::Array(output_messages));
     body.insert(
         "max_tokens".into(),
-        input
-            .get("max_tokens")
-            .or_else(|| input.get("max_completion_tokens"))
+        field(input, "max_tokens")
+            .or_else(|| field(input, "max_completion_tokens"))
             .cloned()
-            .unwrap_or_else(|| json!(4096)),
+            .unwrap_or_else(|| json!(DEFAULT_MAX_TOKENS)),
     );
     if !system.is_empty() {
         body.insert("system".into(), Value::Array(system));
     }
-    if let Some(value) = input.get("temperature") {
+    if let Some(value) = field(input, "temperature") {
         body.insert("temperature".into(), value.clone());
     }
-    if let Some(value) = input.get("top_p") {
+    // Claude rejects temperature and top_p together; temperature wins.
+    if let Some(value) = field(input, "top_p")
+        && !body.contains_key("temperature")
+    {
         body.insert("top_p".into(), value.clone());
     }
-    if let Some(value) = input.get("stop") {
+    if let Some(value) = field(input, "stop") {
         body.insert(
             "stop_sequences".into(),
             if value.is_string() {
@@ -88,21 +92,22 @@ pub fn chat_request_body(
             },
         );
     }
-    if let Some(value) = input.get("stream") {
+    if let Some(value) = field(input, "stream") {
         body.insert("stream".into(), value.clone());
     }
-    let tools_disabled = input.get("tool_choice").and_then(Value::as_str) == Some("none");
-    if !tools_disabled && let Some(tools) = input.get("tools") {
+    let tools_disabled = field(input, "tool_choice").and_then(Value::as_str) == Some("none");
+    if !tools_disabled && let Some(tools) = field(input, "tools") {
         body.insert("tools".into(), convert_tools(tools)?);
     }
-    if !tools_disabled && let Some(choice) = input.get("tool_choice") {
-        if let Some(converted) = convert_tool_choice(choice)? {
-            body.insert("tool_choice".into(), converted);
-        }
+    if !tools_disabled
+        && let Some(choice) = field(input, "tool_choice")
+        && let Some(converted) = convert_tool_choice(choice)?
+    {
+        body.insert("tool_choice".into(), converted);
     }
     if !tools_disabled
         && body.contains_key("tools")
-        && let Some(parallel) = input.get("parallel_tool_calls").and_then(Value::as_bool)
+        && let Some(parallel) = field(input, "parallel_tool_calls").and_then(Value::as_bool)
     {
         let choice = body
             .entry("tool_choice")
@@ -112,22 +117,22 @@ pub fn chat_request_body(
         })?;
         object.insert("disable_parallel_tool_use".into(), Value::Bool(!parallel));
     }
-    validate_stream_options(input.get("stream_options"))?;
-    if let Some(value) = input.get("response_format") {
+    validate_stream_options(field(input, "stream_options"))?;
+    if let Some(value) = field(input, "response_format") {
         if let Some(output_config) = convert_output_config(value, input)? {
             body.insert("output_config".into(), output_config);
         }
-    } else if let Some(effort) = input.get("reasoning_effort") {
+    } else if let Some(effort) = field(input, "reasoning_effort") {
         body.insert("output_config".into(), json!({"effort": effort}));
     }
-    if let Some(user) = input.get("user") {
+    if let Some(user) = field(input, "user") {
         let user = user
             .as_str()
             .ok_or_else(|| ProtocolError::conversion("user must be a string"))?;
         body.insert("metadata".into(), json!({"user_id": user}));
     }
-    validate_modalities(input.get("modalities"))?;
-    validate_store(input.get("store"))?;
+    validate_modalities(field(input, "modalities"))?;
+    validate_store(field(input, "store"))?;
     reject_present(
         input,
         &[
@@ -188,7 +193,7 @@ fn convert_output_config(
             ));
         }
     }
-    if let Some(effort) = input.get("reasoning_effort") {
+    if let Some(effort) = field(input, "reasoning_effort") {
         output.insert("effort".into(), effort.clone());
     }
     Ok((!output.is_empty()).then_some(Value::Object(output)))
@@ -260,7 +265,11 @@ fn copy_extensions(input: &Map<String, Value>, body: &mut Map<String, Value>) {
     }
 }
 
+/// Merge consecutive same-role messages; Anthropic rejects empty content.
 fn append_anthropic_message(output: &mut Vec<Value>, role: &str, mut blocks: Vec<Value>) {
+    if blocks.is_empty() {
+        return;
+    }
     if let Some(last) = output.last_mut()
         && last.get("role").and_then(Value::as_str) == Some(role)
         && let Some(content) = last.get_mut("content").and_then(Value::as_array_mut)
@@ -300,18 +309,20 @@ fn reject_present(
     Ok(())
 }
 
+/// Anthropic rejects empty text blocks, which OpenAI clients commonly send.
+fn text_block(text: &str) -> Option<Value> {
+    (!text.is_empty()).then(|| json!({"type": "text", "text": text}))
+}
+
 fn text_blocks(value: &Value) -> Vec<Value> {
     match value {
-        Value::String(text) => vec![json!({"type": "text", "text": text})],
+        Value::String(text) => text_block(text).into_iter().collect(),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|part| {
-                let text = part.get("text").and_then(Value::as_str)?;
-                Some(json!({"type": "text", "text": text}))
-            })
+            .filter_map(|part| text_block(part.get("text")?.as_str()?))
             .collect(),
         Value::Null => Vec::new(),
-        other => vec![json!({"type": "text", "text": json_string(other)})],
+        other => text_block(&json_string(other)).into_iter().collect(),
     }
 }
 
@@ -323,59 +334,74 @@ fn convert_message_content(
         Some(Value::Array(parts)) => parts
             .iter()
             .map(convert_content_part)
+            .filter_map(Result::transpose)
             .collect::<Result<Vec<_>, _>>()?,
         Some(content) => text_blocks(content),
         None => Vec::new(),
     };
-    if role == "assistant" {
-        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-            for tool_call in tool_calls {
-                let function = tool_call
-                    .get("function")
-                    .ok_or_else(|| ProtocolError::conversion("tool call function is missing"))?;
-                let name = function
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ProtocolError::conversion("tool call name is missing"))?;
-                let id = tool_call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ProtocolError::conversion("tool call id is missing"))?;
-                let input = parse_json_arguments(function.get("arguments"));
-                blocks.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
-            }
+    if role == "assistant"
+        && let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array)
+    {
+        for tool_call in tool_calls {
+            let function = tool_call
+                .get("function")
+                .ok_or_else(|| ProtocolError::conversion("tool call function is missing"))?;
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ProtocolError::conversion("tool call name is missing"))?;
+            let id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ProtocolError::conversion("tool call id is missing"))?;
+            let input = parse_json_arguments(function.get("arguments"));
+            blocks.push(json!({"type": "tool_use", "id": id, "name": name, "input": input}));
         }
     }
     Ok(blocks)
 }
 
-fn convert_content_part(part: &Value) -> Result<Value, ProtocolError> {
+fn convert_content_part(part: &Value) -> Result<Option<Value>, ProtocolError> {
     let object = part
         .as_object()
         .ok_or_else(|| ProtocolError::conversion("content part must be an object"))?;
     match object.get("type").and_then(Value::as_str).unwrap_or("text") {
-        "text" | "input_text" => Ok(json!({
-            "type": "text",
-            "text": object.get("text").and_then(Value::as_str).unwrap_or("")
-        })),
+        "text" | "input_text" => Ok(text_block(
+            object.get("text").and_then(Value::as_str).unwrap_or(""),
+        )),
         "image_url" => {
             let image = object.get("image_url").unwrap_or(part);
             let url = image
                 .get("url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| ProtocolError::conversion("image URL is missing"))?;
-            Ok(json!({
-                "type": "image",
-                "source": {"type": "url", "url": url}
-            }))
+            Ok(Some(json!({"type": "image", "source": image_source(url)?})))
         }
-        "tool_result" => Ok(json!({
+        "tool_result" => Ok(Some(json!({
             "type": "tool_result",
             "tool_use_id": object.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
             "content": object.get("content").cloned().unwrap_or(Value::Null)
-        })),
-        _ => Ok(json!({"type": "text", "text": content_text(part)})),
+        }))),
+        _ => Ok(text_block(&content_text(part))),
     }
+}
+
+/// Inline images must be sent as base64 with a media type, not as `data:` URLs.
+fn image_source(url: &str) -> Result<Value, ProtocolError> {
+    let Some(data_url) = url.strip_prefix("data:") else {
+        return Ok(json!({"type": "url", "url": url}));
+    };
+    let (header, data) = data_url
+        .split_once(',')
+        .ok_or_else(|| ProtocolError::conversion("image data URL is malformed"))?;
+    let mut parameters = header.split(';');
+    let media_type = parameters.next().unwrap_or("").trim();
+    if media_type.is_empty() || !parameters.any(|parameter| parameter.trim() == "base64") {
+        return Err(ProtocolError::conversion(
+            "image data URL must be base64 encoded with a media type",
+        ));
+    }
+    Ok(json!({"type": "base64", "media_type": media_type, "data": data}))
 }
 
 fn anthropic_tool_result_content(value: Option<&Value>) -> Value {
@@ -511,25 +537,26 @@ pub fn response_to_openai_chat(
     output.insert("created".into(), json!(0));
     output.insert("model".into(), json!(requested_model));
     output.insert("choices".into(), json!([Value::Object(choice)]));
-    if let Some(usage) = object.get("usage").and_then(Value::as_object) {
-        let input_tokens = usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let output_tokens = usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        output.insert(
-            "usage".into(),
-            json!({
-                "prompt_tokens": input_tokens,
-                "completion_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens
-            }),
-        );
+    if let Some(usage) = object.get("usage") {
+        output.insert("usage".into(), openai_usage(usage));
     }
     Ok(Value::Object(output))
+}
+
+/// OpenAI `prompt_tokens` covers all input, so cache reads and writes are folded in.
+pub(crate) fn openai_usage(usage: &Value) -> Value {
+    let number = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let cached = number("cache_read_input_tokens");
+    let prompt_tokens = number("input_tokens")
+        .saturating_add(number("cache_creation_input_tokens"))
+        .saturating_add(cached);
+    let completion_tokens = number("output_tokens");
+    json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+        "prompt_tokens_details": {"cached_tokens": cached}
+    })
 }
 
 #[cfg(test)]
@@ -608,6 +635,110 @@ mod tests {
         assert!(chat_request_body(&invalid, "claude").is_err());
         let cache_retention = json!({"messages":[], "prompt_cache_retention":"24h"});
         assert!(chat_request_body(&cache_retention, "claude").is_err());
+    }
+
+    #[test]
+    fn null_optional_fields_are_treated_as_absent() {
+        let request = json!({
+            "messages":[{"role":"user","content":"hi"}],
+            "max_tokens": null,
+            "temperature": null,
+            "top_p": null,
+            "stop": null,
+            "tools": null,
+            "tool_choice": null,
+            "user": null,
+            "response_format": null,
+            "reasoning_effort": null,
+            "store": null
+        });
+        let body = chat_request_body(&request, "claude").unwrap();
+        assert_eq!(body["max_tokens"], 4096);
+        for key in [
+            "temperature",
+            "top_p",
+            "stop_sequences",
+            "tools",
+            "tool_choice",
+            "metadata",
+            "output_config",
+        ] {
+            assert!(body.get(key).is_none(), "{key} should be absent");
+        }
+    }
+
+    #[test]
+    fn temperature_wins_over_top_p() {
+        let request = json!({
+            "messages":[{"role":"user","content":"hi"}],
+            "temperature": 0.2,
+            "top_p": 0.9
+        });
+        let body = chat_request_body(&request, "claude").unwrap();
+        assert_eq!(body["temperature"], 0.2);
+        assert!(body.get("top_p").is_none());
+
+        let only_top_p = json!({"messages":[{"role":"user","content":"hi"}], "top_p": 0.9});
+        let body = chat_request_body(&only_top_p, "claude").unwrap();
+        assert_eq!(body["top_p"], 0.9);
+    }
+
+    #[test]
+    fn empty_text_is_dropped_and_data_urls_become_base64() {
+        let request = json!({
+            "messages":[
+                {"role":"user","content":[
+                    {"type":"text","text":""},
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+                ]},
+                {"role":"assistant","content":"","tool_calls":[
+                    {"id":"call_1","function":{"name":"f","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"call_1","content":"ok"},
+                {"role":"assistant","content":""}
+            ]
+        });
+        let body = chat_request_body(&request, "claude").unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            3,
+            "empty trailing assistant message is skipped"
+        );
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[0]["content"][0]["source"]["type"], "base64");
+        assert_eq!(
+            messages[0]["content"][0]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(messages[0]["content"][0]["source"]["data"], "AAAA");
+        assert_eq!(messages[1]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+
+        let remote = json!({"messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"https://img.test/a.png"}}
+        ]}]});
+        let body = chat_request_body(&remote, "claude").unwrap();
+        assert_eq!(body["messages"][0]["content"][0]["source"]["type"], "url");
+        let malformed = json!({"messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"data:image/png,notbase64"}}
+        ]}]});
+        assert!(chat_request_body(&malformed, "claude").is_err());
+    }
+
+    #[test]
+    fn usage_includes_cached_tokens_in_prompt_total() {
+        let response = json!({
+            "id":"msg_1","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":4,"output_tokens":7,"cache_read_input_tokens":10,"cache_creation_input_tokens":2}
+        });
+        let output = response_to_openai_chat(&response, "public/claude").unwrap();
+        assert_eq!(output["usage"]["prompt_tokens"], 16);
+        assert_eq!(output["usage"]["total_tokens"], 23);
+        assert_eq!(
+            output["usage"]["prompt_tokens_details"]["cached_tokens"],
+            10
+        );
     }
 
     #[test]

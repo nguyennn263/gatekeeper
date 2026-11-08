@@ -10,8 +10,8 @@ forwards the request to the configured upstream protocol.
 
 ## Product contract
 
-- Provider onboarding: URL, API key, compatibility type, model discovery,
-  model selection, provider name, save.
+- Provider onboarding: URL (including the `/v1`-style prefix), API key,
+  compatibility type, model discovery, model selection, provider name, save.
 - Compatibility types: OpenAI Chat Completions, Anthropic Messages, and OpenAI
   Responses (Codex-compatible tool calling).
 - OpenAI-compatible client surface: `GET /v1/models` and

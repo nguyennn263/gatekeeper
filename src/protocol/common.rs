@@ -144,6 +144,11 @@ impl fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+/// Optional request field; an explicit JSON `null` counts as absent.
+pub(crate) fn field<'a>(input: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a Value> {
+    input.get(key).filter(|value| !value.is_null())
+}
+
 pub(crate) fn json_string(value: &Value) -> String {
     match value {
         Value::String(value) => value.clone(),

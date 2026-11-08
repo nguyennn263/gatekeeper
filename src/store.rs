@@ -529,23 +529,7 @@ fn configure_database(connection: &Connection) -> Result<(), StoreError> {
         )
         .map_err(|_| StoreError::Database)?;
 
-    let has_failed_requests = {
-        let mut statement = connection
-            .prepare("PRAGMA table_info(usage_hourly)")
-            .map_err(|_| StoreError::Database)?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|_| StoreError::Database)?;
-        let mut found = false;
-        for column in columns {
-            if column.map_err(|_| StoreError::Database)? == "failed_requests" {
-                found = true;
-                break;
-            }
-        }
-        found
-    };
-    if !has_failed_requests {
+    if !column_exists(connection, "usage_hourly", "failed_requests")? {
         connection
             .execute(
                 "ALTER TABLE usage_hourly ADD COLUMN failed_requests INTEGER NOT NULL DEFAULT 0 CHECK(failed_requests >= 0)",
@@ -553,23 +537,7 @@ fn configure_database(connection: &Connection) -> Result<(), StoreError> {
             )
             .map_err(|_| StoreError::Database)?;
     }
-    let has_enabled = {
-        let mut statement = connection
-            .prepare("PRAGMA table_info(providers)")
-            .map_err(|_| StoreError::Database)?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|_| StoreError::Database)?;
-        let mut found = false;
-        for column in columns {
-            if column.map_err(|_| StoreError::Database)? == "enabled" {
-                found = true;
-                break;
-            }
-        }
-        found
-    };
-    if !has_enabled {
+    if !column_exists(connection, "providers", "enabled")? {
         connection
             .execute(
                 "ALTER TABLE providers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1))",
@@ -578,6 +546,15 @@ fn configure_database(connection: &Connection) -> Result<(), StoreError> {
             .map_err(|_| StoreError::Database)?;
     }
     Ok(())
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    let mut statement = connection
+        .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")
+        .map_err(|_| StoreError::Database)?;
+    statement
+        .exists(params![table, column])
+        .map_err(|_| StoreError::Database)
 }
 
 fn now_unix_seconds() -> Result<i64, StoreError> {
@@ -687,23 +664,18 @@ fn save_provider_sync(
 }
 
 fn row_to_model_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelSummary> {
-    let context_window = row.get::<_, Option<i64>>(4).and_then(|value| {
-        value
+    let positive = |index: usize| -> rusqlite::Result<Option<u64>> {
+        row.get::<_, Option<i64>>(index)?
             .map(|number| u64::try_from(number).map_err(|_| rusqlite::Error::InvalidQuery))
             .transpose()
-    })?;
-    let max_output_tokens = row.get::<_, Option<i64>>(5).and_then(|value| {
-        value
-            .map(|number| u64::try_from(number).map_err(|_| rusqlite::Error::InvalidQuery))
-            .transpose()
-    })?;
+    };
     Ok(ModelSummary {
         alias: row.get(0)?,
         provider_slug: row.get(1)?,
         upstream_id: row.get(2)?,
         display_name: row.get(3)?,
-        context_window,
-        max_output_tokens,
+        context_window: positive(4)?,
+        max_output_tokens: positive(5)?,
         capabilities: serde_json::from_str(&row.get::<_, String>(6)?)
             .map_err(|_| rusqlite::Error::InvalidQuery)?,
     })
@@ -842,7 +814,7 @@ fn find_model_sync(
             |row| {
                 let encrypted_key: Vec<u8> = row.get(10)?;
                 Ok((
-                    row_to_model_summary_offset(row)?,
+                    row_to_model_summary(row)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
@@ -991,27 +963,6 @@ fn delete_model_sync(
         )
         .map_err(|_| StoreError::Database)?;
     Ok(deleted != 0)
-}
-
-fn row_to_model_summary_offset(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModelSummary> {
-    let context_window = row
-        .get::<_, Option<i64>>(4)?
-        .and_then(|value| u64::try_from(value).ok());
-    let max_output_tokens = row
-        .get::<_, Option<i64>>(5)?
-        .and_then(|value| u64::try_from(value).ok());
-    let capabilities_json: String = row.get(6)?;
-    let capabilities =
-        serde_json::from_str(&capabilities_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    Ok(ModelSummary {
-        alias: row.get(0)?,
-        provider_slug: row.get(1)?,
-        upstream_id: row.get(2)?,
-        display_name: row.get(3)?,
-        context_window,
-        max_output_tokens,
-        capabilities,
-    })
 }
 
 fn delete_provider_sync(connection: &Connection, slug: &str) -> Result<bool, StoreError> {

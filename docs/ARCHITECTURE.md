@@ -68,6 +68,8 @@ only.
    trusted.
 5. The public alias is `<provider-slug>/<upstream-model-id>`. The provider slug
    is stable after creation. Upstream model IDs may themselves contain `/`.
+6. The saved base URL is used verbatim for `/models`, `/chat/completions`,
+   `/messages`, and `/responses`; only a bare origin receives a `/v1` prefix.
 
 The operator may configure up to two fallback keys while saving a provider or
 manage the encrypted fallback slots later from Inventory. Duplicate primary or
@@ -127,8 +129,8 @@ upstream body, and dropping the downstream stream drops the upstream response.
   malformed JSON remains a 400 response.
 - Non-stream success body: 8 MiB; error body: 256 KiB.
 - Global upstream concurrency: 32 by default, configurable down to 1.
-- Concurrent inbound dispatch: 64 by default; bearer authentication happens
-  before JSON body extraction.
+- Concurrent inbound dispatch: 64 by default, load-shed with `503 gateway_busy`
+  when exceeded; bearer authentication happens before JSON body extraction.
 - Connect timeout: 10 seconds; provider response-header/first-byte timeout: 300
   seconds by default.
 - Non-stream/discovery body idle timeout: 60 seconds per chunk.
