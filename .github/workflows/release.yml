@@ -1,0 +1,55 @@
+name: release
+
+# Static x86_64 musl binary for the VPS (systemd, no Docker). Runs on tags v* or by hand.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.TARGET }}
+      - run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Package
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || VERSION="main-${GITHUB_SHA::8}"
+          mkdir -p out/pkg
+          cp "target/$TARGET/release/northgate" out/pkg/
+          cp deploy/northgate.service .env.example out/pkg/
+          tar -C out/pkg -czf "out/northgate-${VERSION}-${TARGET}.tar.gz" .
+          (cd out && sha256sum *.tar.gz > SHA256SUMS)
+          file out/pkg/northgate; ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: northgate-${{ env.TARGET }}
+          path: |
+            out/*.tar.gz
+            out/SHA256SUMS
+      - name: Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.tar.gz
+            out/SHA256SUMS
+          generate_release_notes: true
