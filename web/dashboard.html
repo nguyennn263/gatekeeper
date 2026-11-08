@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Northgate · Dashboard</title>
+    <link rel="stylesheet" href="/style.css">
+    <script defer src="/dashboard.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Northgate home">
+          <span class="brand-mark" aria-hidden="true">N</span>
+          <span>Northgate</span>
+        </a>
+        <nav class="top-nav" aria-label="Admin navigation">
+          <a href="/">Model registry</a>
+          <a class="active" href="/dashboard" aria-current="page">Dashboard</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="shell dashboard-shell">
+      <section class="intro dashboard-intro" aria-labelledby="page-title">
+        <p class="eyebrow">Admin console</p>
+        <h1 id="page-title">Usage at a glance.</h1>
+        <p class="lede">Request volume and provider-reported input, output, and cached tokens—aggregated without storing prompts or responses.</p>
+      </section>
+
+      <section class="admin-token panel dashboard-access" aria-labelledby="token-title">
+        <div class="panel-heading compact-heading">
+          <div>
+            <p class="step-kicker">Access</p>
+            <h2 id="token-title">Admin token</h2>
+          </div>
+          <span class="memory-badge">Memory only</span>
+        </div>
+        <div class="dashboard-access-row">
+          <div class="field token-field">
+            <label for="admin-token">NORTHGATE_ADMIN_TOKEN</label>
+            <div class="input-with-action">
+              <input id="admin-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste admin token">
+              <button id="toggle-admin-token" class="text-button" type="button" aria-controls="admin-token" aria-pressed="false">Show</button>
+            </div>
+          </div>
+          <div class="field range-field">
+            <label for="stats-range">Khoảng thời gian</label>
+            <select id="stats-range">
+              <option value="24h">24 giờ</option>
+              <option value="7d">7 ngày</option>
+              <option value="30d">30 ngày</option>
+              <option value="90d">90 ngày</option>
+            </select>
+          </div>
+          <button id="load-dashboard" class="primary-button dashboard-load" type="button">Load dashboard</button>
+        </div>
+        <p class="field-help">Token chỉ tồn tại trong bộ nhớ của trang này và bị xóa khi rời trang.</p>
+        <div id="dashboard-error" class="alert error" role="alert" hidden></div>
+      </section>
+
+      <section aria-labelledby="overview-title">
+        <div class="section-line">
+          <div>
+            <p class="step-kicker">Overview</p>
+            <h2 id="overview-title">Traffic</h2>
+          </div>
+          <span id="updated-at" class="muted" aria-live="polite">Chưa tải dữ liệu</span>
+        </div>
+        <div class="metric-grid">
+          <article class="metric-card"><span>Requests</span><strong id="metric-requests">—</strong></article>
+          <article class="metric-card failed"><span>Provider failures</span><strong id="metric-failed">—</strong></article>
+          <article class="metric-card input"><span>Input tokens</span><strong id="metric-input">—</strong></article>
+          <article class="metric-card output"><span>Output tokens</span><strong id="metric-output">—</strong></article>
+          <article class="metric-card cache"><span>Cache tokens</span><strong id="metric-cache">—</strong></article>
+        </div>
+      </section>
+
+      <section class="panel chart-panel" aria-labelledby="trend-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Timeline</p>
+            <h2 id="trend-title">Token trend</h2>
+            <p class="muted">Stacked bars: input, output, cached input. Hover or focus a bar for exact values.</p>
+          </div>
+        </div>
+        <div id="usage-chart" class="usage-chart" role="img" aria-label="Token usage over time"></div>
+        <div class="chart-legend" aria-hidden="true">
+          <span><i class="input"></i>Input</span><span><i class="output"></i>Output</span><span><i class="cache"></i>Cache</span>
+        </div>
+        <div id="chart-empty" class="empty-state">Load dashboard để xem biểu đồ.</div>
+      </section>
+
+      <section class="panel" aria-labelledby="models-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Models</p>
+            <h2 id="models-title">Usage & live test</h2>
+            <p class="muted">Test gửi prompt ngắn qua đúng protocol của model. Stream hiển thị nguyên SSE theo thời gian thực.</p>
+          </div>
+        </div>
+        <div class="model-toolbar">
+          <label class="model-search" for="model-search">
+            <span>Search</span>
+            <input id="model-search" type="search" autocomplete="off" spellcheck="false" placeholder="Model hoặc provider…">
+          </label>
+          <label class="model-provider-filter" for="provider-filter">
+            <span>Provider</span>
+            <select id="provider-filter">
+              <option value="">Tất cả providers</option>
+            </select>
+          </label>
+          <span id="model-filter-count" class="model-filter-count" aria-live="polite"></span>
+        </div>
+        <div id="model-action-error" class="alert error" role="alert" hidden></div>
+        <div class="table-scroll">
+          <table class="stats-table">
+            <thead><tr><th>Model</th><th>Requests</th><th>Failed</th><th>Input</th><th>Output</th><th>Cache</th><th>Actions</th></tr></thead>
+            <tbody id="model-stats-body"></tbody>
+          </table>
+        </div>
+        <div id="models-empty" class="empty-state">Load dashboard để xem models.</div>
+      </section>
+
+      <section id="test-panel" class="panel test-panel" aria-labelledby="test-title" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Live response</p>
+            <h2 id="test-title">Model test</h2>
+            <p id="test-meta" class="muted"></p>
+          </div>
+          <button id="clear-test" class="secondary-button" type="button">Clear</button>
+        </div>
+        <div id="test-error" class="alert error" role="alert" hidden></div>
+        <pre id="test-output" class="test-output" tabindex="0" aria-live="polite"></pre>
+      </section>
+    </main>
+
+    <footer class="site-footer shell">Counts are hourly aggregates. Northgate never stores test prompts, model responses, or stream contents.</footer>
+  </body>
+</html>

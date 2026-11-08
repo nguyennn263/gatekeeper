@@ -1,0 +1,25 @@
+[Unit]
+Description=Northgate model registry and protocol gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=northgate
+Group=northgate
+WorkingDirectory=/opt/northgate
+EnvironmentFile=/etc/northgate.env
+ExecStart=/opt/northgate/northgate
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/northgate
+UMask=0077
+StateDirectory=northgate
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

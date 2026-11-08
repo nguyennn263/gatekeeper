@@ -1,0 +1,43 @@
+name: northgate
+
+services:
+  northgate:
+    image: northgate:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NORTHGATE_BIND: 0.0.0.0:8787
+      NORTHGATE_DATABASE_PATH: /data/northgate.db
+      NORTHGATE_MAX_UPSTREAM_CONCURRENCY: "${NORTHGATE_DOCKER_MAX_UPSTREAM_CONCURRENCY:-16}"
+      NORTHGATE_MAX_INBOUND_CONCURRENCY: "${NORTHGATE_DOCKER_MAX_INBOUND_CONCURRENCY:-32}"
+      RUST_LOG: northgate=info,tower_http=warn
+    ports:
+      - "127.0.0.1:${NORTHGATE_DOCKER_PORT:-8787}:8787"
+    volumes:
+      - northgate-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpus: 0.5
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+volumes:
+  northgate-data:

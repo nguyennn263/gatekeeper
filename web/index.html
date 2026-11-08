@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Northgate · Model registry</title>
+    <link rel="stylesheet" href="/style.css">
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="#top" aria-label="Northgate home">
+          <span class="brand-mark" aria-hidden="true">N</span>
+          <span>Northgate</span>
+        </a>
+        <nav class="top-nav" aria-label="Admin navigation">
+          <a class="active" href="/" aria-current="page">Model registry</a>
+          <a href="/dashboard">Dashboard</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top" class="shell">
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">Admin console</p>
+        <h1 id="page-title">Connect a provider once.</h1>
+        <p class="lede">Discover the models you use, save them under one provider name, and let your harnesses share the catalog.</p>
+      </section>
+
+      <section class="admin-token panel" aria-labelledby="token-title">
+        <div class="panel-heading compact-heading">
+          <div>
+            <p class="step-kicker">Access</p>
+            <h2 id="token-title">Admin token</h2>
+          </div>
+          <span class="memory-badge">Memory only</span>
+        </div>
+        <div class="field token-field">
+          <label for="admin-token">NORTHGATE_ADMIN_TOKEN</label>
+          <div class="input-with-action">
+            <input id="admin-token" name="admin-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste admin token">
+            <button id="toggle-admin-token" class="text-button" type="button" aria-controls="admin-token" aria-pressed="false">Show</button>
+          </div>
+          <p class="field-help">The token stays in this page's memory and is never saved to browser storage.</p>
+        </div>
+      </section>
+
+      <nav class="steps" aria-label="Provider setup progress">
+        <ol>
+          <li class="active" data-step-indicator="1"><span>1</span><strong>Connect</strong></li>
+          <li data-step-indicator="2"><span>2</span><strong>Choose models</strong></li>
+          <li data-step-indicator="3"><span>3</span><strong>Save provider</strong></li>
+        </ol>
+      </nav>
+
+      <section class="panel setup-panel" aria-labelledby="connect-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Step 1</p>
+            <h2 id="connect-title">Connect to a provider</h2>
+          </div>
+          <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+        </div>
+        <form id="discover-form" novalidate>
+          <div class="field">
+            <label for="base-url">Provider URL</label>
+            <input id="base-url" name="base-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.example.com/v1" required>
+            <p class="field-help">Use the provider's API base URL. Northgate will call its model endpoint.</p>
+          </div>
+
+          <div class="field">
+            <label for="provider-key">Provider API key</label>
+            <div class="input-with-action">
+              <input id="provider-key" name="provider-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste provider key" required>
+              <button id="toggle-provider-key" class="text-button" type="button" aria-controls="provider-key" aria-pressed="false">Show</button>
+            </div>
+            <p class="field-help">Kept in memory until a successful save, then cleared.</p>
+          </div>
+
+          <fieldset class="field protocol-field">
+            <legend>Compatibility</legend>
+            <div class="protocol-options">
+              <label class="protocol-option">
+                <input type="radio" name="protocol" value="openai" checked>
+                <span><strong>OpenAI-compatible</strong><small>Chat Completions model API</small></span>
+              </label>
+              <label class="protocol-option">
+                <input type="radio" name="protocol" value="anthropic">
+                <span><strong>Anthropic-compatible</strong><small>Messages model API</small></span>
+              </label>
+              <label class="protocol-option">
+                <input type="radio" name="protocol" value="responses">
+                <span><strong>Responses</strong><small>Codex-compatible tool calling</small></span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="form-actions">
+            <button id="discover-button" class="primary-button" type="submit">Discover models</button>
+            <span id="discover-status" class="inline-status" role="status" aria-live="polite"></span>
+          </div>
+          <div id="discover-error" class="alert error" role="alert" hidden></div>
+        </form>
+      </section>
+
+      <section id="models-panel" class="panel models-panel" aria-labelledby="models-title" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Step 2</p>
+            <h2 id="models-title">Choose models to keep</h2>
+            <p id="models-summary" class="muted">Discover models to see available metadata.</p>
+          </div>
+          <button id="discover-again" class="secondary-button" type="button">Discover again</button>
+        </div>
+        <div class="table-toolbar">
+          <label class="select-all"><input id="select-all" type="checkbox"><span>Select all</span></label>
+          <span id="selection-count" class="selection-count" aria-live="polite">0 selected</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <caption class="visually-hidden">Discovered provider models</caption>
+            <thead>
+              <tr>
+                <th scope="col" class="check-column"><span class="visually-hidden">Select</span></th>
+                <th scope="col">Model</th>
+                <th scope="col">Context</th>
+                <th scope="col">Max output</th>
+                <th scope="col">Capabilities</th>
+              </tr>
+            </thead>
+            <tbody id="models-body"></tbody>
+          </table>
+        </div>
+        <div id="models-empty" class="empty-state" hidden>No models were returned by this provider.</div>
+        <div id="model-error" class="alert error" role="alert" hidden></div>
+      </section>
+
+      <section id="save-panel" class="panel save-panel" aria-labelledby="save-title" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Step 3</p>
+            <h2 id="save-title">Name this provider</h2>
+            <p class="muted">Saved aliases use the form <code>provider/model</code>.</p>
+          </div>
+        </div>
+        <form id="save-form" novalidate>
+          <div class="field">
+            <label for="provider-name">Provider name</label>
+            <input id="provider-name" name="provider-name" type="text" autocomplete="organization" maxlength="120" placeholder="e.g. My Anthropic" required>
+            <p class="field-help">This becomes the stable provider slug used by your harness.</p>
+          </div>
+          <fieldset class="field fallback-field">
+            <legend>Fallback API keys (optional)</legend>
+            <div class="fallback-key-grid">
+              <input id="fallback-key-1" type="password" autocomplete="new-password" spellcheck="false" placeholder="Fallback API key 1">
+              <input id="fallback-key-2" type="password" autocomplete="new-password" spellcheck="false" placeholder="Fallback API key 2">
+            </div>
+            <p class="field-help">Maximum 2. The primary key is always tried first; fallback keys are only used after a provider failure.</p>
+          </fieldset>
+          <div class="form-actions">
+            <button id="save-button" class="primary-button" type="submit">Save provider</button>
+            <span id="save-status" class="inline-status" role="status" aria-live="polite"></span>
+          </div>
+          <div id="save-error" class="alert error" role="alert" hidden></div>
+        </form>
+      </section>
+
+      <section class="panel inventory-panel" aria-labelledby="inventory-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Inventory</p>
+            <h2 id="inventory-title">Saved providers</h2>
+            <p class="muted">Your saved model aliases are ready for any OpenAI-compatible harness.</p>
+          </div>
+          <button id="refresh-inventory" class="secondary-button" type="button">Refresh</button>
+        </div>
+        <div id="inventory-status" class="inline-status" role="status" aria-live="polite"></div>
+        <div id="inventory-error" class="alert error" role="alert" hidden></div>
+        <div id="inventory-list" class="inventory-list"></div>
+        <div id="inventory-empty" class="empty-state">Enter an admin token to load saved providers.</div>
+      </section>
+
+      <section id="add-models-panel" class="panel models-panel" aria-labelledby="add-models-title" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="step-kicker">Existing provider</p>
+            <h2 id="add-models-title">Add models</h2>
+            <p id="add-models-summary" class="muted">Discover models from a saved provider.</p>
+          </div>
+          <button id="cancel-add-models" class="secondary-button" type="button">Cancel</button>
+        </div>
+        <div class="table-toolbar">
+          <label class="select-all"><input id="add-models-select-all" type="checkbox"><span>Select all new models</span></label>
+          <span id="add-models-selection-count" class="selection-count" aria-live="polite">0 selected</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <caption class="visually-hidden">Models available to add</caption>
+            <thead><tr><th scope="col" class="check-column"><span class="visually-hidden">Select</span></th><th scope="col">Model</th><th scope="col">Context</th><th scope="col">Max output</th><th scope="col">Capabilities</th></tr></thead>
+            <tbody id="add-models-body"></tbody>
+          </table>
+        </div>
+        <div id="add-models-empty" class="empty-state" hidden>No new models are available from this provider.</div>
+        <div id="add-models-error" class="alert error" role="alert" hidden></div>
+        <div class="form-actions">
+          <button id="add-models-save" class="primary-button" type="button" disabled>Add selected models</button>
+          <span id="add-models-status" class="inline-status" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer shell">Northgate keeps provider keys encrypted at rest and does not store prompts or responses.</footer>
+  </body>
+</html>
